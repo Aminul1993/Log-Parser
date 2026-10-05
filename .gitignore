@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Local configuration
+.env
+
+# Log data: large and contains production secrets/PII (JWTs, e-mail addresses). Never commit.
+logs/
+data/
+*.parquet

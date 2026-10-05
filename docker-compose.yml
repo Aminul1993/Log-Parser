@@ -1,0 +1,90 @@
+# Full stack: API + PostgreSQL/pgvector + Ollama (models pulled automatically on first start).
+#   docker compose up -d --build
+#   curl localhost:8000/ready
+# The Parquet file is mounted read-only from DATA_DIR (default: this directory).
+name: log-analytics
+
+x-model-env: &model-env
+  LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
+  EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+
+services:
+  api:
+    build: .
+    image: log-analytics:latest
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      LA_ENVIRONMENT: production
+      LA_PARQUET_PATH: /data/${PARQUET_FILE:-syslog.parquet}
+      LA_DATABASE_URL: postgresql://${POSTGRES_USER:-logan}:${POSTGRES_PASSWORD:-logan}@postgres:5432/${POSTGRES_DB:-logan}
+      LA_OLLAMA_BASE_URL: http://ollama:11434
+      LA_OLLAMA_MODEL: ${LLM_MODEL:-llama3.1:8b}
+      LA_OLLAMA_EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      LA_EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
+      LA_API_KEY: ${LA_API_KEY:-}
+      LA_LOG_YEAR: ${LA_LOG_YEAR:-}
+    volumes:
+      - ${DATA_DIR:-.}:/data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-logan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-logan}
+      POSTGRES_DB: ${POSTGRES_DB:-logan}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_NUM_PARALLEL: 2
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    # GPU acceleration (NVIDIA Container Toolkit required) - uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      <<: *model-env
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c", "ollama pull \"$$LLM_MODEL\" && ollama pull \"$$EMBED_MODEL\""]
+    restart: "no"
+
+volumes:
+  pgdata:
+  ollama:
