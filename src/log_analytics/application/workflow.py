@@ -47,7 +47,7 @@ def route_after_plan(state: AnalysisState) -> str:
 
 
 def route_after_load(state: AnalysisState) -> str:
-    return LogClassificationAgent.name if state["profile"].total_rows else ReportComposerAgent.name
+    return LogClassificationAgent.name if state["row_count"] else ReportComposerAgent.name
 
 
 def route_after_correlation(state: AnalysisState) -> str:

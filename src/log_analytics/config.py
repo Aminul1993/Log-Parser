@@ -21,10 +21,16 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = True
     api_key: SecretStr | None = None
+    # Production refuses to serve without an API key unless this is set (trusted networks only).
+    allow_anonymous: bool = False
     cors_origins: list[str] = Field(default_factory=list)
     query_timeout_s: float = Field(default=600.0, gt=0)
+    # Heavy computations (background jobs, /query, dashboards) share these slots.
     max_concurrent_jobs: int = Field(default=2, ge=1)
+    max_pending_jobs: int = Field(default=20, ge=1)
+    capacity_wait_s: float = Field(default=30.0, gt=0)
     max_stored_runs: int = Field(default=200, ge=1)
+    run_retention_days: int = Field(default=30, ge=1)
 
     # --- data source
     parquet_path: str = "syslog.parquet"

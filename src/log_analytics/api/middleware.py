@@ -30,7 +30,12 @@ class RequestContextMiddleware:
             nonlocal status
             if message["type"] == "http.response.start":
                 status = message["status"]
-                message["headers"] = [*message.get("headers", []), (b"x-request-id", request_id.encode())]
+                message["headers"] = [
+                    *message.get("headers", []),
+                    (b"x-request-id", request_id.encode()),
+                    # Responses carry log text; never let a browser sniff a report into HTML.
+                    (b"x-content-type-options", b"nosniff"),
+                ]
             await send(message)
 
         with structlog.contextvars.bound_contextvars(request_id=request_id):

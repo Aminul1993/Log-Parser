@@ -17,6 +17,10 @@ class ConflictError(LogAnalyticsError):
     """The resource exists but is not in a state that allows the operation (e.g. report not ready)."""
 
 
+class CapacityError(LogAnalyticsError):
+    """Every analysis slot is busy or the job queue is full; the caller should retry later."""
+
+
 class FeatureUnavailableError(LogAnalyticsError):
     """An optional capability (vector store, LLM) is not configured or not reachable."""
 

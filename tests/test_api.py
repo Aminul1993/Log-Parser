@@ -13,6 +13,9 @@ from pydantic import SecretStr
 from log_analytics.api.app import create_app
 from log_analytics.bootstrap import build_container
 from log_analytics.config import Settings
+from log_analytics.domain.errors import CapacityError
+from log_analytics.domain.models import AnalysisRun, RunKind, RunStatus
+from log_analytics.infrastructure.run_repositories import InMemoryRunRepository
 from tests.conftest import JWT
 from tests.fakes import FakeEmbedder, InMemoryVectorStore
 
@@ -38,13 +41,27 @@ def _wait(client: TestClient, url: str, timeout: float = 60.0) -> dict:
     raise AssertionError(f"job did not finish: {body}")
 
 
+def _wait_ready(client: TestClient, timeout: float = 60.0):  # type: ignore[no-untyped-def]
+    """Poll /ready while the dataset warms up (503 "warming" until the classification cache exists)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        response = client.get("/ready")
+        body = response.json()
+        if response.status_code == 200 or time.monotonic() > deadline:
+            return response
+        assert response.status_code == 503 and body["status"] == "warming", body
+        time.sleep(0.05)
+
+
 def test_health_and_readiness(client: TestClient) -> None:
     assert client.get("/health").json()["status"] == "ok"
-    ready = client.get("/ready")
+    ready = _wait_ready(client)
     assert ready.status_code == 200
     body = ready.json()
     assert body["status"] == "degraded" and body["components"]["dataset"]["ok"] is True
+    assert body["components"]["dataset"]["warming"] is False
     assert "x-request-id" in ready.headers
+    assert ready.headers["x-content-type-options"] == "nosniff"
 
 
 def test_request_id_is_propagated(client: TestClient) -> None:
@@ -126,6 +143,50 @@ def test_api_key_protects_v1_routes(settings: Settings) -> None:
         assert client.get("/api/v1/logs/catalog").status_code == 401
         assert client.get("/api/v1/logs/catalog", headers={"X-API-Key": "wrong"}).status_code == 401
         assert client.get("/api/v1/logs/catalog", headers={"X-API-Key": "s3cret"}).status_code == 200
+
+
+def test_production_requires_an_api_key(settings: Settings) -> None:
+    production = settings.model_copy(update={"environment": "production"})
+    with pytest.raises(RuntimeError, match="LA_API_KEY is required"):
+        create_app(production)
+    assert create_app(production.model_copy(update={"api_key": SecretStr("k")}))
+    assert create_app(production.model_copy(update={"allow_anonymous": True}))
+
+
+class _SaturatedJobs:
+    """Stands in for a JobRunner whose queue and slots are all taken."""
+
+    async def submit(self, *args: object, **kwargs: object) -> None:
+        raise CapacityError("2 jobs are already queued or running; retry later")
+
+    async def run_now(self, work: object) -> None:
+        raise CapacityError("All analysis slots stayed busy for 30s; retry later")
+
+
+def test_capacity_errors_map_to_429_with_retry_after(settings: Settings) -> None:
+    container = asyncio.run(build_container(settings))
+    container.jobs = _SaturatedJobs()  # type: ignore[assignment]
+    with TestClient(create_app(settings, container=container)) as client:
+        responses = [
+            client.post("/api/v1/analyses", json={}),
+            client.post("/api/v1/query", json={"question": "Summarize errors by host."}),
+            client.get("/api/v1/insights/top-errors"),
+            client.get("/api/v1/logs/stats"),
+        ]
+        for response in responses:
+            assert response.status_code == 429, response.text
+            assert response.headers["retry-after"] == "30"
+            assert "retry later" in response.json()["detail"]
+        assert client.get("/api/v1/logs", params={"limit": 1}).status_code == 200  # cheap reads stay available
+
+
+def test_unfinished_runs_are_failed_at_startup(settings: Settings) -> None:
+    runs = InMemoryRunRepository()
+    stale = AnalysisRun.new(RunKind.ANALYSIS, {"question": "left running"}).transition(RunStatus.RUNNING)
+    asyncio.run(runs.save(stale))
+    with _client(settings, runs=runs) as client:
+        run = client.get(f"/api/v1/analyses/{stale.id}").json()
+        assert run["status"] == "failed" and "interrupted" in run["error"]
 
 
 def test_workflow_diagram(client: TestClient) -> None:

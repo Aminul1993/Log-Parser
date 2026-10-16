@@ -55,10 +55,13 @@ log-analytics ingest logs/syslog logs/syslog.1 -o syslog.parquet
 ## Docker (API + PostgreSQL/pgvector + Ollama)
 
 ```bash
-cp .env.example .env                    # optional
+cp .env.example .env                    # then set LA_API_KEY (openssl rand -hex 32): production requires it
 docker compose up -d --build            # first start pulls the models (several GB)
-curl localhost:8000/ready
+curl localhost:8000/ready               # 503 "warming" until the dataset is classified, then 200
 ```
+
+The API is published on `127.0.0.1` only; set `API_BIND=0.0.0.0` to reach it from other machines (put TLS in
+front of it).
 
 The Parquet file is mounted read-only from `DATA_DIR` (default: this directory) as
 `/data/${PARQUET_FILE:-syslog.parquet}`. Choose models with `LLM_MODEL=qwen2.5:7b` / `EMBED_MODEL=…`
@@ -82,11 +85,17 @@ always override what was parsed from the question.
 
 ## API
 
-All `/api/v1` routes require `X-API-Key` when `LA_API_KEY` is set. Interactive docs are at `/docs`.
+All `/api/v1` routes require `X-API-Key` when `LA_API_KEY` is set. With `LA_ENVIRONMENT=production` the server
+refuses to start without a key (`LA_ALLOW_ANONYMOUS=true` opts out, for trusted networks only). Interactive docs
+are at `/docs`.
+
+Heavy work (`POST /query`, background analyses and indexing, `/insights/*`, `/logs/stats`) shares
+`LA_MAX_CONCURRENT_JOBS` slots, and at most `LA_MAX_PENDING_JOBS` jobs can be queued. When the service is
+saturated it answers `429` with `Retry-After` instead of running out of memory.
 
 | Method & path | Purpose |
 |---|---|
-| `GET /health`, `GET /ready` | Liveness; readiness of dataset (required), LLM and vector store (optional) |
+| `GET /health`, `GET /ready` | Liveness; readiness of dataset (required, `503 warming` until classified), LLM and vector store (optional) |
 | `GET /api/v1/logs` | Filtered, classified, redacted lines: `start`, `end`, `hostname`*, `process`*, `keyword`*, `keyword_mode`, `min_severity`, `limit`, `offset`, `order` (* repeatable) |
 | `GET /api/v1/logs/catalog` · `/logs/stats` | Known hosts/processes/time range · volume and distributions |
 | `GET /api/v1/insights/top-errors` · `/host-health` · `/anomalies` | Fast deterministic dashboards (no LLM), same filters |
@@ -120,15 +129,25 @@ Notable ones:
 | `LA_CACHE_DATASET` | `true` | Classify once per data version in memory; `false` = stream every query |
 | `LA_LLM_ENABLED` / `LA_OLLAMA_MODEL` | `true` / `llama3.1:8b` | Any Ollama chat model |
 | `LA_DATABASE_URL` | unset | Enables RAG and durable run history; without it, runs are kept in memory |
+| `LA_API_KEY` / `LA_ALLOW_ANONYMOUS` | unset / `false` | Key required in production unless anonymous access is explicitly allowed |
+| `LA_MAX_CONCURRENT_JOBS` / `LA_MAX_PENDING_JOBS` / `LA_CAPACITY_WAIT_S` | `2` / `20` / `30` | Concurrent heavy computations, queued jobs, how long a request waits for a slot before `429` |
+| `LA_RUN_RETENTION_DAYS` | `30` | Run history older than this is deleted (checked at startup and every 6 h) |
 | `LA_REDACT_SECRETS` / `LA_REDACT_EMAILS` | `true` | Applied before analysis, API output, prompts and embeddings |
 | `LA_ANOMALY_BUCKET` / `LA_ANOMALY_Z_THRESHOLD` / `LA_SILENCE_GAP_MINUTES` | `5m` / `3.5` / `15` | Detection tuning |
 
 ## Development
 
 ```bash
-pytest -q             # 120+ tests: synthetic scenarios, fake LLM/vector store, API, plus a real-data smoke test
-ruff check src tests && ruff format --check src tests
+pytest -q                     # 130+ tests: synthetic scenarios, fake LLM/vector store, API, golden master
+pytest -m realdata            # opt-in smoke test on data/syslog.parquet (or LA_REALDATA_PATH); slow, several GB RAM
+ruff check src tests benchmarks && ruff format --check src tests benchmarks
+python benchmarks/bench.py data/syslog.parquet   # warm-up, analyses, dashboards, memory per step
 ```
+
+`tests/test_golden.py` compares every report produced for a set of requests with snapshots in `tests/golden/`,
+so performance refactors cannot silently change results. After an intended change, regenerate them with
+`LA_UPDATE_GOLDEN=1 pytest tests/test_golden.py` and review the diff. CI (`.github/workflows/ci.yml`) runs lint,
+tests, `pip-audit` and the Docker build.
 
 The suite covers parsing edge cases (year rollover, timezones, ISO and mixed formats), classification and
 redaction, every detector against planted scenarios, the query parser, the Ollama HTTP contract (retries,
@@ -141,7 +160,8 @@ API tests cover jobs, reports, RAG and auth.
 * PostgreSQL/pgvector and a live Ollama model are exercised through their adapters' contracts and test
   doubles; validate them in your environment with `docker compose up` and `/ready`.
 * One API worker per container: jobs and the classification cache are in-process. Scale with replicas
-  plus a shared queue (the `JobRunner` and `RunRepository` ports are the seams).
+  plus a shared queue (the `JobRunner` and `RunRepository` ports are the seams). At startup, runs left
+  `pending`/`running` by a previous process are marked failed; this assumes a single replica per database.
 * Template mining is regex-based; very noisy free-text messages can still split into near-duplicate
   templates. Incidents merge them by known signature, and you can extend `knowledge.py`.
 * Not included: a UI, Prometheus metrics, and alert delivery (Slack/PagerDuty). Each would plug into

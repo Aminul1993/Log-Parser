@@ -1,8 +1,7 @@
-"""Data Loading Agent: pushes the plan's filter into the Parquet scan and stages the working set."""
+"""Data Loading Agent: pushes the plan's filter into the scan (or the classified cache) and stages the working set."""
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from log_analytics.application.agents.base import Agent
@@ -21,8 +20,10 @@ class DataLoadingAgent(Agent):
 
     async def run(self, state: AnalysisState) -> dict[str, Any]:
         plan = state["plan"]
-        frame = await self._dataset.load_raw(plan.filter)
+        frame = await self._dataset.load_working_set(plan.filter)
         self._frames.put(state["run_id"], frame)
-        profile = await asyncio.to_thread(profile_frame, frame)
-        warnings = [] if frame.height else [f"No log records matched the filter ({plan.filter.describe()})."]
-        return {"profile": profile, "warnings": warnings}
+        if frame.height:
+            return {"row_count": frame.height, "warnings": []}  # the classifier profiles the final working set
+        # Nothing matched: the reporter runs next and reports on an empty profile.
+        warning = f"No log records matched the filter ({plan.filter.describe()})."
+        return {"row_count": 0, "profile": profile_frame(frame), "warnings": [warning]}

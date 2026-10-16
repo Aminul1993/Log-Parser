@@ -28,6 +28,7 @@ class AnalysisState(TypedDict, total=False):
     run_id: str
     request: AnalysisRequest
     plan: QueryPlan
+    row_count: int
     profile: DatasetProfile
     template_labels: dict[str, str]
     errors: ErrorFindings

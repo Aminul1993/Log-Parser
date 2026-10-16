@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 from fastapi import Depends, Header, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -13,12 +15,25 @@ from pydantic import ValidationError
 from log_analytics.bootstrap import Container
 from log_analytics.domain.models import KeywordMode, LogFilter, Severity
 
+T = TypeVar("T")
+
 
 def get_container(request: Request) -> Container:
     return request.app.state.container
 
 
 ContainerDep = Annotated[Container, Depends(get_container)]
+
+
+async def run_bounded(container: Container, work: Callable[[], Awaitable[T]]) -> T:
+    """Run a heavy, request-scoped computation under the shared analysis concurrency limit."""
+    try:
+        async with asyncio.timeout(container.settings.query_timeout_s):
+            return await container.jobs.run_now(work)
+    except TimeoutError:
+        raise HTTPException(
+            status.HTTP_504_GATEWAY_TIMEOUT, "Computation exceeded the synchronous timeout (LA_QUERY_TIMEOUT_S)."
+        ) from None
 
 
 async def require_api_key(

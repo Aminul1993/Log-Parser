@@ -20,7 +20,9 @@ router = APIRouter(tags=["analysis"])
 async def query(body: QueryRequest, container: ContainerDep) -> AnalysisResult:
     request = AnalysisRequest(question=body.question, filter=body.filter, intent=body.intent)
     try:
-        return await asyncio.wait_for(container.workflow.run(request), timeout=container.settings.query_timeout_s)
+        async with asyncio.timeout(container.settings.query_timeout_s):
+            # Shares the analysis slots with background jobs: 429 + Retry-After when all stay busy.
+            return await container.jobs.run_now(lambda: container.workflow.run(request))
     except TimeoutError:
         raise HTTPException(
             status.HTTP_504_GATEWAY_TIMEOUT,

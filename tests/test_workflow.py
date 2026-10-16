@@ -8,6 +8,7 @@ from log_analytics.bootstrap import build_container
 from log_analytics.config import Settings
 from log_analytics.domain.models import AnalysisRequest, Intent, LogFilter, Severity
 from log_analytics.domain.reports import ReportType
+from log_analytics.infrastructure.parquet_repository import ParquetLogRepository
 from tests.fakes import FakeEmbedder, FakeLLM, InMemoryVectorStore
 
 
@@ -148,6 +149,65 @@ async def test_cached_and_streaming_paths_agree(settings: Settings, flt: LogFilt
     assert results[0] == results[1]
     if flt.keywords == ("hunter2",):
         assert results[0][0] == 0
+
+
+class _CountingRepository:
+    """Counts full scans of the underlying source."""
+
+    def __init__(self, inner: ParquetLogRepository) -> None:
+        self._inner = inner
+        self.scans = 0
+
+    def scan(self):  # type: ignore[no-untyped-def]
+        self.scans += 1
+        return self._inner.scan()
+
+    def version(self) -> str:
+        return self._inner.version()
+
+    def describe_source(self) -> str:
+        return self._inner.describe_source()
+
+
+async def test_cached_runs_never_rescan_the_source(settings: Settings, parquet_path) -> None:  # type: ignore[no-untyped-def]
+    repository = _CountingRepository(ParquetLogRepository(str(parquet_path), log_year=2026, cache=False))
+    container = await _container(settings, repository=repository)
+    assert not container.dataset.ready
+    await container.warmup()
+    assert container.dataset.ready and repository.scans == 2  # catalog + one classification pass
+    for request in (AnalysisRequest(), AnalysisRequest(filter=LogFilter(hostnames=("db-01",))), AnalysisRequest()):
+        result = await container.workflow.run(request)
+        assert result.reports.executive_summary.total_logs > 0
+    assert repository.scans == 2
+    await container.aclose()
+
+
+async def test_readiness_reports_warm_up(settings: Settings) -> None:
+    container = await _container(settings)
+    before = (await container.readiness())["dataset"]
+    assert before["ok"] is False and before["warming"] is True
+    await container.warmup()
+    after = (await container.readiness())["dataset"]
+    assert after["ok"] is True and after["warming"] is False
+    await container.aclose()
+
+    streaming = await _container(settings.model_copy(update={"cache_dataset": False}))
+    assert streaming.dataset.ready  # nothing to warm: every query streams from the source
+    await streaming.aclose()
+
+
+async def test_failed_warm_up_is_reported_not_shown_as_warming(settings: Settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    container = await _container(settings)
+
+    def broken() -> None:
+        raise RuntimeError("classification exploded")
+
+    monkeypatch.setattr(container.dataset, "warm", broken)
+    await container.warmup()
+    dataset = (await container.readiness())["dataset"]
+    assert dataset["ok"] is False and dataset["warming"] is False
+    assert "classification exploded" in dataset["error"]
+    await container.aclose()
 
 
 @pytest.mark.parametrize("node", ["planner", "classifier", "error_detector", "anomaly_detector", "correlator"])

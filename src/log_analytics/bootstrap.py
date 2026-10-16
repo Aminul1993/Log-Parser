@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, TypeVar
 
 import structlog
@@ -64,12 +65,22 @@ class Container:
     indexer: PatternIndexer | None
     retriever: PatternRetriever | None
     _closers: list[Any] = field(default_factory=list)
+    _warmup_error: str | None = None
 
     async def readiness(self) -> dict[str, dict[str, Any]]:
         components: dict[str, dict[str, Any]] = {}
         try:
             catalog = await self.dataset.catalog()
-            components["dataset"] = {"ok": True, "rows": catalog.total_rows, "source": self.dataset.describe_source()}
+            ready = self.dataset.ready
+            components["dataset"] = {
+                # Not ready while the classification cache is built: requests would queue behind it.
+                "ok": ready,
+                "warming": not ready and self._warmup_error is None,
+                "rows": catalog.total_rows,
+                "source": self.dataset.describe_source(),
+            }
+            if not ready and self._warmup_error:
+                components["dataset"]["error"] = self._warmup_error
         except Exception as exc:
             components["dataset"] = {"ok": False, "error": str(exc)}
         if self.llm_client is not None and self.llm.enabled:
@@ -89,7 +100,36 @@ class Container:
             await self.dataset.catalog()
             await asyncio.to_thread(self.dataset.warm)
         except Exception as exc:
+            self._warmup_error = f"warm-up failed: {type(exc).__name__}: {exc}"
             log.warning("dataset_warmup_failed", error=str(exc))
+
+    async def recover_runs(self) -> None:
+        """Fail runs a previous process left pending/running (crash, OOM kill): no task will ever finish them.
+
+        Safe with one API replica, the supported deployment; several replicas sharing PostgreSQL need run
+        ownership (heartbeats) first.
+        """
+        reason = "interrupted: the service restarted before the run finished"
+        try:
+            failed = await self.runs.fail_unfinished(reason=reason)
+        except Exception:
+            log.exception("run_recovery_failed")
+            return
+        if failed:
+            log.warning("unfinished_runs_failed", count=failed)
+
+    async def maintain_runs(self, interval_s: float = 6 * 3600) -> None:
+        """Delete run history older than LA_RUN_RETENTION_DAYS, now and then every ``interval_s``."""
+        retention = timedelta(days=self.settings.run_retention_days)
+        while True:
+            try:
+                purged = await self.runs.purge(older_than=retention)
+            except Exception:
+                log.exception("run_purge_failed")
+            else:
+                if purged:
+                    log.info("runs_purged", count=purged, retention_days=self.settings.run_retention_days)
+            await asyncio.sleep(interval_s)
 
     async def aclose(self) -> None:
         await self.jobs.shutdown()
@@ -101,11 +141,13 @@ class Container:
 
 
 def build_repository(settings: Settings) -> LogRepository:
+    # DatasetService caches the *classified* frame (LA_CACHE_DATASET). A second, raw in-memory copy in the
+    # repository would double resident memory (1.3 GB on 7.8M rows) and is never read after warm-up.
     return ParquetLogRepository(
         settings.parquet_path,
         log_year=settings.log_year,
         log_timezone=settings.log_timezone,
-        cache=settings.cache_dataset,
+        cache=False,
     )
 
 
@@ -204,7 +246,12 @@ async def build_container(
         dataset=dataset,
         workflow=workflow,
         insights=InsightsService(dataset, error_detector, anomaly_detector, correlator, builder),
-        jobs=JobRunner(runs, max_concurrency=settings.max_concurrent_jobs),
+        jobs=JobRunner(
+            runs,
+            max_concurrency=settings.max_concurrent_jobs,
+            max_pending=settings.max_pending_jobs,
+            slot_wait_s=settings.capacity_wait_s,
+        ),
         runs=runs,
         llm=gateway,
         llm_client=llm_client,

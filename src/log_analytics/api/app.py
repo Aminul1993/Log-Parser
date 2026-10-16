@@ -20,23 +20,39 @@ from log_analytics.config import Settings, get_settings
 from log_analytics.infrastructure.logging import configure_logging
 
 
+def _ensure_auth_configured(settings: Settings) -> None:
+    """Fail closed: a production API without a key would expose every log line and expensive endpoint."""
+    if settings.environment == "production" and settings.api_key is None and not settings.allow_anonymous:
+        raise RuntimeError(
+            "LA_API_KEY is required when LA_ENVIRONMENT=production "
+            "(set LA_ALLOW_ANONYMOUS=true only on a trusted network)"
+        )
+
+
 def create_app(settings: Settings | None = None, container: Container | None = None) -> FastAPI:
     settings = settings or (container.settings if container else get_settings())
+    _ensure_auth_configured(settings)
     configure_logging(settings.log_level, json=settings.log_json)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned = container is None
-        app.state.container = container or await build_container(settings)
-        warmup = asyncio.create_task(app.state.container.warmup())  # load + cache the dataset in background
+        app.state.container = active = container or await build_container(settings)
+        await active.recover_runs()  # before accepting jobs: earlier unfinished runs can never complete
+        background = [
+            asyncio.create_task(active.warmup()),  # load + cache the dataset; /ready turns ok when done
+            asyncio.create_task(active.maintain_runs()),  # run-history retention
+        ]
         try:
             yield
         finally:
-            warmup.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await warmup
+            for task in background:
+                task.cancel()
+            for task in background:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             if owned:
-                await app.state.container.aclose()
+                await active.aclose()
 
     app = FastAPI(
         title="Log Analytics API",

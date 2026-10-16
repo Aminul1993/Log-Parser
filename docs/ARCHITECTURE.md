@@ -99,7 +99,7 @@ flowchart TD
 | Node | Responsibility | LLM use (all optional) |
 |---|---|---|
 | `planner` | NL question → intent + validated `LogFilter`. Rules handle common phrasings. Relative time resolves against the dataset end (or now). Hosts and processes are matched against the data. | Only when no rule matches (`PlannedQuery`). The LLM's entities are re-validated and times re-resolved deterministically. |
-| `data_loader` | Pushes time/host/process filters into the Parquet scan; stages the working set in the `FrameStore` (DataFrames stay outside graph state). | – |
+| `data_loader` | Loads the working set once and stages it in the `FrameStore` (DataFrames stay outside graph state). With the cache on, that is one filter over the classified frame; otherwise time/host/process filters are pushed into the Parquet scan and the classifier enriches the rows. | – |
 | `classifier` | Severity, category and template for every row; secret redaction; keyword and severity filters. | Classifies the top templates (`TemplateLabels`). Categories are applied to all matching rows with one join. |
 | `error_detector` | Critical errors, frequent/recurring patterns, per-host/process stats, explicit failures (OOM, crash, unit failures, abnormal exits), restarts (PID replacement + whether errors preceded it). | Explains the top patterns (`PatternExplanations`). |
 | `anomaly_detector` | Robust z-score against a trailing rolling median (MAD scale, Poisson floor) for volume and error spikes; daily-seasonality labelling; host silence; heartbeat gaps for regular processes; outage bursts. | – |
@@ -162,9 +162,13 @@ sequenceDiagram
     participant G as LangGraph workflow
 
     C->>API: POST /api/v1/analyses {question?, filter, intent?}
-    API->>R: save(run: pending)
-    API->>J: create_task(work)
-    API-->>C: 202 {run_id, status_url}
+    alt queue full (LA_MAX_PENDING_JOBS)
+        API-->>C: 429 + Retry-After
+    else accepted
+        API->>R: save(run: pending)
+        API->>J: create_task(work)
+        API-->>C: 202 {run_id, status_url}
+    end
     J->>R: save(running)
     J->>G: ainvoke(state)
     G-->>J: AnalysisResult
@@ -172,6 +176,14 @@ sequenceDiagram
     C->>API: GET /api/v1/analyses/{id}/reports/{type}?format=markdown
     API->>R: get(id) → render
 ```
+
+* **Capacity:** background jobs and request-scoped heavy work (`/query`, `/insights/*`, `/logs/stats`) share the
+  same `LA_MAX_CONCURRENT_JOBS` slots. A request that cannot get a slot within `LA_CAPACITY_WAIT_S` gets `429`,
+  so memory stays bounded by the number of slots, not by the number of clients.
+* **Restarts:** at startup, runs still `pending`/`running` belong to a process that no longer exists (crash, OOM
+  kill) and are marked failed. That is only safe with one replica per database; several replicas need run
+  ownership (heartbeats) first.
+* **Retention:** runs older than `LA_RUN_RETENTION_DAYS` are deleted at startup and every 6 hours.
 
 ## Data model (PostgreSQL)
 

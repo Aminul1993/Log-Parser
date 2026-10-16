@@ -33,8 +33,8 @@ class LogClassificationAgent(Agent):
 
     async def run(self, state: AnalysisState) -> dict[str, Any]:
         run_id, plan = state["run_id"], state["plan"]
-        raw = self._frames.get(run_id)
-        frame = await asyncio.to_thread(self._dataset.classify, raw, plan.filter)
+        staged = self._frames.get(run_id)
+        frame = await asyncio.to_thread(self._dataset.classify, staged, plan.filter)
         labels: dict[str, str] = {}
         warnings: list[str] = []
         candidates = await asyncio.to_thread(self._candidates, frame)

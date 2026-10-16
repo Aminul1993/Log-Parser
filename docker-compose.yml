@@ -14,8 +14,10 @@ services:
     image: log-analytics:latest
     restart: unless-stopped
     ports:
-      - "${API_PORT:-8000}:8000"
+      # Loopback by default; set API_BIND=0.0.0.0 to expose it (behind TLS) to other machines.
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8000}:8000"
     environment:
+      # Production requires LA_API_KEY (generate one with: openssl rand -hex 32).
       LA_ENVIRONMENT: production
       LA_PARQUET_PATH: /data/${PARQUET_FILE:-syslog.parquet}
       LA_DATABASE_URL: postgresql://${POSTGRES_USER:-logan}:${POSTGRES_PASSWORD:-logan}@postgres:5432/${POSTGRES_DB:-logan}
@@ -24,6 +26,7 @@ services:
       LA_OLLAMA_EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       LA_EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
       LA_API_KEY: ${LA_API_KEY:-}
+      LA_ALLOW_ANONYMOUS: ${LA_ALLOW_ANONYMOUS:-}
       LA_LOG_YEAR: ${LA_LOG_YEAR:-}
     volumes:
       - ${DATA_DIR:-.}:/data:ro

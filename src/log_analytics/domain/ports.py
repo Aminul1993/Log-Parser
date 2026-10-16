@@ -7,6 +7,7 @@ services: keeping millions of rows columnar and vectorised is the whole point of
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import timedelta
 from typing import Protocol, TypeVar, runtime_checkable
 
 import polars as pl
@@ -73,3 +74,12 @@ class RunRepository(Protocol):
     async def get(self, run_id: str) -> AnalysisRun | None: ...
 
     async def list(self, *, limit: int = 20) -> list[AnalysisRun]: ...
+
+    async def fail_unfinished(self, *, reason: str) -> int:
+        """Mark every pending/running run failed; returns how many. Called at startup, when no task of this
+        process can own them yet (single replica: a previous process crashed or was killed)."""
+        ...
+
+    async def purge(self, *, older_than: timedelta) -> int:
+        """Delete runs created before ``now - older_than``; returns how many."""
+        ...

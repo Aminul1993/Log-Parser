@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 
-from log_analytics.domain.models import AnalysisRun
+from log_analytics.domain.models import AnalysisRun, RunStatus
+
+_UNFINISHED = (RunStatus.PENDING, RunStatus.RUNNING)
+
+
+def _affected(status: str) -> int:
+    """Row count from an asyncpg command tag such as ``UPDATE 3`` or ``DELETE 0``."""
+    return int(status.rsplit(" ", 1)[-1])
 
 
 class InMemoryRunRepository:
@@ -25,6 +33,19 @@ class InMemoryRunRepository:
 
     async def list(self, *, limit: int = 20) -> list[AnalysisRun]:
         return sorted(self._runs.values(), key=lambda r: r.created_at, reverse=True)[:limit]
+
+    async def fail_unfinished(self, *, reason: str) -> int:
+        stale = [run for run in self._runs.values() if run.status in _UNFINISHED]
+        for run in stale:
+            self._runs[run.id] = run.transition(RunStatus.FAILED, error=reason)
+        return len(stale)
+
+    async def purge(self, *, older_than: timedelta) -> int:
+        cutoff = datetime.now(UTC) - older_than
+        expired = [run_id for run_id, run in self._runs.items() if run.created_at < cutoff]
+        for run_id in expired:
+            del self._runs[run_id]
+        return len(expired)
 
 
 class PostgresRunRepository:
@@ -63,3 +84,18 @@ class PostgresRunRepository:
                 limit,
             )
         return [AnalysisRun.model_validate(dict(r)) for r in rows]
+
+    async def fail_unfinished(self, *, reason: str) -> int:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                "UPDATE analysis_runs SET status = $1, error = $2, updated_at = now() WHERE status = ANY($3::text[])",
+                RunStatus.FAILED.value,
+                reason,
+                [s.value for s in _UNFINISHED],
+            )
+        return _affected(status)
+
+    async def purge(self, *, older_than: timedelta) -> int:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute("DELETE FROM analysis_runs WHERE created_at < now() - $1::interval", older_than)
+        return _affected(status)
