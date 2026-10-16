@@ -166,3 +166,6 @@ API tests cover jobs, reports, RAG and auth.
   templates. Incidents merge them by known signature, and you can extend `knowledge.py`.
 * Not included: a UI, Prometheus metrics, and alert delivery (Slack/PagerDuty). Each would plug into
   the existing reports.
+* Planned optimisation and hardening work, with measurements, is tracked in
+  [docs/ROADMAP.md](docs/ROADMAP.md). With the full 7.8M-row `data/syslog.parquet`, the API currently needs
+  a 6–8 GB memory limit rather than the 4 GB set in `docker-compose.yml`.
