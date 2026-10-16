@@ -81,10 +81,20 @@ def test_cli_analyze_writes_markdown(tmp_path: Path, parquet_path: Path, monkeyp
     assert code == 0 and "byte indices" in output.read_text(encoding="utf-8")
 
 
-REAL = Path(__file__).resolve().parents[1] / "syslog.parquet"
+def _real_dataset() -> Path:
+    """``LA_REALDATA_PATH``, else the bundled ``data/syslog.parquet``, else ``syslog.parquet`` in the repo root."""
+    root = Path(__file__).resolve().parents[1]
+    candidates = [Path(p) for p in [os.getenv("LA_REALDATA_PATH")] if p] + [
+        root / "data" / "syslog.parquet",
+        root / "syslog.parquet",
+    ]
+    return next((p for p in candidates if p.exists()), candidates[-1])
 
 
-@pytest.mark.realdata
+REAL = _real_dataset()
+
+
+@pytest.mark.realdata  # opt-in (slow, several GB of RAM): pytest -m realdata
 @pytest.mark.skipif(not REAL.exists() or os.getenv("LA_SKIP_REALDATA") == "1", reason="real dataset not present")
 async def test_real_dataset_end_to_end() -> None:
     settings = Settings(_env_file=None, parquet_path=str(REAL), llm_enabled=False, log_level="WARNING")  # type: ignore[call-arg]

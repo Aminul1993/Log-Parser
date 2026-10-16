@@ -39,7 +39,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["src"]
-markers = ["realdata: runs against the real syslog.parquet in the repo root (skipped when absent)"]
+addopts = "-m 'not realdata'"
+markers = ["realdata: opt-in run against the real dataset (pytest -m realdata; LA_REALDATA_PATH overrides the path)"]
 
 [tool.ruff]
 line-length = 120

@@ -12,9 +12,7 @@ ANCHOR = datetime(2026, 10, 1, 15, 28, tzinfo=UTC)
 
 @pytest.fixture
 def parser() -> RuleBasedQueryParser:
-    return RuleBasedQueryParser(
-        ["web-01", "db-01", "ip-127-0-0-1"], ["python", "CRON", "postfix/smtp", "sshd"], ANCHOR
-    )
+    return RuleBasedQueryParser(["web-01", "db-01", "ip-127-0-0-1"], ["python", "CRON", "postfix/smtp", "sshd"], ANCHOR)
 
 
 @pytest.mark.parametrize(
